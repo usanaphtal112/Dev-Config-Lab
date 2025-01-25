@@ -46,11 +46,11 @@ Create a new security group in AWS Console:
 ├──────────────┼─────────┼────────────┼────────────────────────┤
 │ TCP          │ 22      │ Your IP    │ SSH Access             │
 │ TCP          │ 25      │ 0.0.0.0/0  │ SMTP                   │
-│ TCP          │ 465     │ 0.0.0.0/0  │ SMTPS (Legacy Secure) │
-│ TCP          │ 587     │ 0.0.0.0/0  │ Submission (Modern)   │
+│ TCP          │ 465     │ 0.0.0.0/0  │ SMTPS (Legacy Secure)  │
+│ TCP          │ 587     │ 0.0.0.0/0  │ Submission (Modern)    │
 │ TCP          │ 143     │ 0.0.0.0/0  │ IMAP                   │
-│ TCP          │ 993     │ 0.0.0.0/0  │ IMAPS (Secure)        │
-│ TCP          │ 80      │ 0.0.0.0/0  │ HTTP (Let's Encrypt)  │
+│ TCP          │ 993     │ 0.0.0.0/0  │ IMAPS (Secure)         │
+│ TCP          │ 80      │ 0.0.0.0/0  │ HTTP (Let's Encrypt)   │
 │ TCP          │ 443     │ 0.0.0.0/0  │ HTTPS                  │
 └──────────────┴─────────┴────────────┴────────────────────────┘
 ```
@@ -74,17 +74,17 @@ whoami  # Should return: ubuntu
 Log into your domain registrar's control panel and add these records:
 
 ```plaintext
-┌─────────┬────────────────────────┬─────────────────────────────┬───────┐
-│ Type    │ Name                   │ Value                       │ TTL   │
-├─────────┼────────────────────────┼─────────────────────────────┼───────┤
-│ A       │ mail.naphtal.tech.     │ 34.203.228.116             │ 3600  │
-│ A       │ naphtal.tech.          │ 34.203.228.116             │ 3600  │
-│ MX      │ naphtal.tech.          │ mail.naphtal.tech. (prio:10)│ 3600  │
-│ TXT     │ naphtal.tech.          │ v=spf1 ip4:34.203.228.116  │ 3600  │
-│         │                        │ a mx ~all                   │       │
-│ TXT     │ _dmarc.naphtal.tech.  │ v=DMARC1; p=none;          │ 3600  │
-│         │                        │ rua=mailto:admin@naphtal.tech│       │
-└─────────┴────────────────────────┴─────────────────────────────┴───────┘
+┌─────────┬────────────────────────┬──────────────────────────────────┬───────┐
+│ Type    │ Name                   │ Value                            │ TTL   │
+├─────────┼────────────────────────┼──────────────────────────────────┼───────┤
+│ A       │ mail.naphtal.tech.     │ 34.203.228.116                   │ 3600  │
+│ A       │ naphtal.tech.          │ 34.203.228.116                   │ 3600  │
+│ MX      │ naphtal.tech.          │ mail.naphtal.tech. (prio:10)     │ 3600  │
+│ TXT     │ naphtal.tech.          │ v=spf1 ip4:34.203.228.116        │ 3600  │
+│         │                        │ a mx ~all                        │       │
+│ TXT     │ _dmarc.naphtal.tech.   │ v=DMARC1; p=none;                │ 3600  │
+│         │                        │ rua=mailto:admin@naphtal.tech    │       │
+└─────────┴────────────────────────┴──────────────────────────────────┴───────┘
 ```
 
 ### Verify DNS Configuration
@@ -1389,6 +1389,134 @@ Add these lines:
 # Daily log rotation at 2 AM
 0 2 * * * /usr/sbin/logrotate /etc/logrotate.d/mail
 ```
+
+
+
+
+## Testing Email Sending
+
+### 1. Using Command Line
+```bash
+# Simple mail command
+echo "This is a test email body" | mail -s "Test Subject" usanaphtal112@gmail.com
+
+# Detailed mail command with from address
+echo "This is a test email body" | mail -s "Test Subject" -r admin@naphtal.tech usanaphtal112@gmail.com
+
+# Using swaks (Swiss Army Knife for SMTP) for detailed testing
+sudo apt install swaks -y
+
+# Test with STARTTLS (port 587)
+swaks --to usanaphtal112@gmail.com \
+      --from admin@naphtal.tech \
+      --server mail.naphtal.tech \
+      --port 587 \
+      --auth-user admin@naphtal.tech \
+      --auth-password "your-password" \
+      --tls \
+      --header "Subject: Test Email" \
+      --body "This is a test email from my mail server"
+
+# Test with SSL (port 465)
+swaks --to usanaphtal112@gmail.com \
+      --from admin@naphtal.tech \
+      --server mail.naphtal.tech \
+      --port 465 \
+      --auth-user admin@naphtal.tech \
+      --auth-password "your-password" \
+      --tls-on-connect \
+      --header "Subject: Test Email" \
+      --body "This is a test email from my mail server"
+```
+
+### 2. Using Python Script
+```python
+#!/usr/bin/python3
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+# Email configuration
+smtp_server = "mail.naphtal.tech"
+smtp_port = 587  # or 465 for SSL
+sender_email = "admin@naphtal.tech"
+sender_password = "your-password"
+recipient_email = "usanaphtal112@gmail.com"
+
+# Create message
+msg = MIMEMultipart()
+msg['From'] = sender_email
+msg['To'] = recipient_email
+msg['Subject'] = "Test Email from Python"
+
+body = "This is a test email sent from my mail server using Python."
+msg.attach(MIMEText(body, 'plain'))
+
+try:
+    # Create server connection
+    server = smtplib.SMTP(smtp_server, smtp_port)
+    server.starttls()  # Enable TLS
+    
+    # Login and send email
+    server.login(sender_email, sender_password)
+    text = msg.as_string()
+    server.sendmail(sender_email, recipient_email, text)
+    print("Email sent successfully!")
+    
+except Exception as e:
+    print(f"Error sending email: {e}")
+    
+finally:
+    server.quit()
+```
+
+### 3. Verify Email Delivery
+```bash
+# Check mail logs for delivery status
+sudo tail -f /var/log/mail.log
+
+# Check mail queue
+sudo postqueue -p
+
+# Check for any errors
+sudo grep "error" /var/log/mail.log | tail -n 20
+```
+
+### Common Issues and Solutions:
+
+1. If emails are not being delivered:
+```bash
+# Check if your IP is blacklisted
+dig +short zen.spamhaus.org
+
+# Verify reverse DNS
+dig -x 34.203.228.116
+
+# Check SPF record
+dig TXT naphtal.tech
+```
+
+2. If authentication fails:
+```bash
+# Verify user permissions
+sudo postconf -e 'smtpd_sasl_auth_enable = yes'
+sudo postconf -e 'broken_sasl_auth_clients = yes'
+
+# Restart services
+sudo systemctl restart postfix
+sudo systemctl restart dovecot
+```
+
+3. If TLS/SSL fails:
+```bash
+# Verify certificate permissions
+sudo ls -l /etc/letsencrypt/live/mail.naphtal.tech/
+sudo chmod -R 755 /etc/letsencrypt/live/
+sudo chmod -R 755 /etc/letsencrypt/archive/
+```
+
+
+
 
 ## 13. Django/Flask Email Integration 🐍
 
