@@ -6,14 +6,16 @@
 2. [Security Group Configuration](#security)
 3. [DNS Setup](#dns)
 4. [Core Software Installation](#installation)
-5. [Postfix Configuration](#postfix)
-6. [Virtual Users Setup](#virtual-users)
-7. [Dovecot Configuration](#dovecot)
-8. [SSL Certificate Setup](#ssl)
-9. [Testing & Verification](#testing)
-10. [Email Client Setup](#client-setup)
-11. [Security Hardening](#security-hardening)
-12. [Troubleshooting Guide](#troubleshooting)
+5. [SSL Certificate Setup](#ssl)
+6. [Postfix Configuration](#postfix)
+7. [Virtual Users Setup](#virtual-users)
+8. [Dovecot Configuration](#dovecot)
+9. [Security Hardening](#security-hardening)
+10. [Testing & Verification](#testing)
+11. [Email Client Setup](#client-setup)
+12. [Monitoring & Maintenance](#monitoring)
+13. [Django/Flask Email Integration](#django-flask)
+14. [Troubleshooting Guide](#troubleshooting)
 
 <a name="prerequisites"></a>
 ## 1. Prerequisites & Planning 🔍
@@ -151,10 +153,145 @@ for service in postfix dovecot mysql; do
 done
 ```
 
-<a name="postfix"></a>
-## 5. Postfix Configuration 📨
+<a name="ssl"></a>
+## 5. SSL Certificate Setup 🔒
 
-### 5.1 Backup Original Configuration
+### 5.1 Install Certbot
+```bash
+# Install Certbot and its dependencies
+sudo apt update
+sudo apt install certbot python3-certbot-nginx -y
+
+# Stop any services using port 80
+sudo systemctl stop nginx apache2 2>/dev/null
+```
+
+### 5.2 Obtain SSL Certificate
+```bash
+# Request certificate for mail domain
+sudo certbot certonly --standalone \
+    --preferred-challenges http \
+    -d mail.naphtal.tech \
+    --agree-tos \
+    --email admin@naphtal.tech \
+    --rsa-key-size 4096
+
+# Verify certificate files
+sudo ls -l /etc/letsencrypt/live/mail.naphtal.tech/
+```
+
+Expected Output:
+```plaintext
+total 4
+lrwxrwxrwx 1 root root 42 Mar 20 12:00 cert.pem -> ../../archive/mail.naphtal.tech/cert1.pem
+lrwxrwxrwx 1 root root 43 Mar 20 12:00 chain.pem -> ../../archive/mail.naphtal.tech/chain1.pem
+lrwxrwxrwx 1 root root 47 Mar 20 12:00 fullchain.pem -> ../../archive/mail.naphtal.tech/fullchain1.pem
+lrwxrwxrwx 1 root root 45 Mar 20 12:00 privkey.pem -> ../../archive/mail.naphtal.tech/privkey1.pem
+```
+
+### 5.3 Set Up Auto-Renewal
+```bash
+# Create renewal hook directory
+sudo mkdir -p /etc/letsencrypt/renewal-hooks/post
+
+# Create renewal script
+sudo nano /etc/letsencrypt/renewal-hooks/post/reload-mail-services.sh
+```
+
+Add to the script:
+```bash
+#!/bin/bash
+
+# Reload mail services after certificate renewal
+systemctl reload postfix
+systemctl reload dovecot
+
+# Log the renewal
+echo "Certificate renewed on $(date)" >> /var/log/letsencrypt-renewal.log
+```
+
+Set permissions:
+```bash
+# Make script executable
+sudo chmod +x /etc/letsencrypt/renewal-hooks/post/reload-mail-services.sh
+
+# Test auto-renewal
+sudo certbot renew --dry-run
+```
+
+### 5.4 Configure Certificate Permissions
+```bash
+# Allow mail services to read certificates
+sudo chmod -R 755 /etc/letsencrypt/live/
+sudo chmod -R 755 /etc/letsencrypt/archive/
+
+# Verify permissions
+ls -la /etc/letsencrypt/live/mail.naphtal.tech/
+```
+
+### 5.5 Update Service Configurations
+
+Update Postfix SSL settings:
+```bash
+sudo postconf -e 'smtpd_tls_cert_file=/etc/letsencrypt/live/mail.naphtal.tech/fullchain.pem'
+sudo postconf -e 'smtpd_tls_key_file=/etc/letsencrypt/live/mail.naphtal.tech/privkey.pem'
+```
+
+Update Dovecot SSL settings:
+```bash
+sudo sed -i 's|^ssl_cert.*|ssl_cert = </etc/letsencrypt/live/mail.naphtal.tech/fullchain.pem|' /etc/dovecot/conf.d/10-ssl.conf
+sudo sed -i 's|^ssl_key.*|ssl_key = </etc/letsencrypt/live/mail.naphtal.tech/privkey.pem|' /etc/dovecot/conf.d/10-ssl.conf
+```
+
+### 5.6 Verify SSL Setup
+```bash
+# Test SSL certificate
+openssl s_client -connect mail.naphtal.tech:993 -showcerts
+
+# Test SMTP over SSL
+openssl s_client -connect mail.naphtal.tech:465 -showcerts
+
+# Check certificate expiration
+echo | openssl s_client -servername mail.naphtal.tech \
+    -connect mail.naphtal.tech:993 2>/dev/null | \
+    openssl x509 -noout -dates
+```
+
+Common Issues and Solutions:
+
+1. Certificate Renewal Failures:
+```bash
+# Check renewal logs
+sudo tail -f /var/log/letsencrypt/letsencrypt.log
+
+# Force renewal test
+sudo certbot renew --force-renewal --dry-run
+```
+
+2. Permission Issues:
+```bash
+# Fix common permission problems
+sudo chmod -R 755 /etc/letsencrypt/live/
+sudo chmod -R 755 /etc/letsencrypt/archive/
+sudo chown -R root:root /etc/letsencrypt/live/
+sudo chown -R root:root /etc/letsencrypt/archive/
+```
+
+3. Service Reload Issues:
+```bash
+# Check service status after reload
+sudo systemctl status postfix
+sudo systemctl status dovecot
+
+# Check logs for errors
+sudo journalctl -u postfix --since "1 hour ago"
+sudo journalctl -u dovecot --since "1 hour ago"
+```
+
+<a name="postfix"></a>
+## 6. Postfix Configuration 📨
+
+### 6.1 Backup Original Configuration
 ```bash
 # Create backup directory
 sudo mkdir -p /etc/mail/backup
@@ -167,7 +304,7 @@ sudo cp /etc/postfix/master.cf /etc/mail/backup/master.cf.$(date +%Y%m%d)
 ls -lh /etc/mail/backup/
 ```
 
-### 5.2 Main Configuration File
+### 6.2 Main Configuration File
 ```bash
 # Edit main.cf
 sudo nano /etc/postfix/main.cf
@@ -235,14 +372,23 @@ smtpd_recipient_restrictions =
     reject_rbl_client zen.spamhaus.org
 ```
 
-### 5.3 Master Configuration File
+### 6.3 Master Configuration File
 ```bash
 # Edit master.cf
 sudo nano /etc/postfix/master.cf
 ```
 
-Add these service definitions:
+Add these service definitions after beginning of the file:
 ```plaintext
+# Submission port 587
+# ==========================================================================
+# service type  private unpriv  chroot  wakeup  maxproc command + args
+#               (yes)   (yes)   (no)    (never) (100)
+# ==========================================================================
+
+# Standard SMTP (port 25)
+smtp      inet  n       -       y       -       -       smtpd
+
 # Submission port 587
 submission inet n       -       y       -       -       smtpd
   -o syslog_name=postfix/submission
@@ -262,7 +408,7 @@ smtps     inet  n       -       y       -       -       smtpd
   -o milter_macro_daemon_name=ORIGINATING
 ```
 
-### 5.4 Verify Configuration
+### 6.4 Verify Configuration
 ```bash
 # Test Postfix configuration
 sudo postfix check
@@ -295,9 +441,9 @@ sudo postconf -e 'smtpd_tls_security_level = none'
 ```
 
 <a name="virtual-users"></a>
-## 6. Virtual Users Setup 👥
+## 7. Virtual Users Setup 👥
 
-### 6.1 Mail Directory Structure
+### 7.1 Mail Directory Structure
 ```bash
 # Create main mail directory
 sudo mkdir -p /var/mail/vhosts/naphtal.tech
@@ -321,7 +467,7 @@ drwxr-xr-x 3 root  root  4096 Mar 20 10:00 ..
 drwxrwx--- 2 vmail vmail 4096 Mar 20 10:00 naphtal.tech
 ```
 
-### 6.2 Virtual Domain Configuration
+### 7.2 Virtual Domain Configuration
 ```bash
 # Create virtual domains file
 sudo nano /etc/postfix/virtual-mailbox-domains
@@ -332,7 +478,7 @@ Add domain:
 naphtal.tech OK
 ```
 
-### 6.3 Virtual Users Setup
+### 7.3 Virtual Users Setup
 ```bash
 # Create virtual users file
 sudo nano /etc/postfix/virtual-mailbox-users
@@ -348,7 +494,7 @@ user3@naphtal.tech        naphtal.tech/user3/
 user4@naphtal.tech        naphtal.tech/user4/
 ```
 
-### 6.4 Create Mailbox Directories
+### 7.4 Create Mailbox Directories
 ```bash
 # Create individual mailbox directories
 for user in admin user1 user2 user3 user4; do
@@ -371,7 +517,7 @@ Expected Output:
 └── user4
 ```
 
-### 6.5 Generate Postfix Lookup Tables
+### 7.5 Generate Postfix Lookup Tables
 ```bash
 # Create database files
 sudo postmap /etc/postfix/virtual-mailbox-domains
@@ -381,7 +527,7 @@ sudo postmap /etc/postfix/virtual-mailbox-users
 ls -l /etc/postfix/*.db
 ```
 
-### 6.6 User Password Management
+### 7.6 User Password Management
 ```bash
 # Create password file
 sudo nano /etc/dovecot/users
@@ -409,7 +555,7 @@ sudo chmod 640 /etc/dovecot/users
 3. Store passwords securely
 4. Consider using encrypted password hashes instead of PLAIN
 
-### 6.7 Verify Setup
+### 7.7 Verify Setup
 ```bash
 # Check permissions
 find /var/mail/vhosts -type d -ls
@@ -449,9 +595,9 @@ done
 ```
 
 <a name="dovecot"></a>
-## 7. Dovecot Configuration 📬
+## 8. Dovecot Configuration 📬
 
-### 7.1 Backup Original Configuration
+### 8.1 Backup Original Configuration
 ```bash
 # Create backup of original configuration
 sudo cp -r /etc/dovecot /etc/dovecot.backup.$(date +%Y%m%d)
@@ -460,7 +606,7 @@ sudo cp -r /etc/dovecot /etc/dovecot.backup.$(date +%Y%m%d)
 ls -la /etc/dovecot.backup.*
 ```
 
-### 7.2 Main Configuration
+### 8.2 Main Configuration
 ```bash
 # Edit main configuration file
 sudo nano /etc/dovecot/dovecot.conf
@@ -485,7 +631,7 @@ default_internal_user = vmail
 default_internal_group = vmail
 ```
 
-### 7.3 SSL Configuration
+### 8.3 SSL Configuration
 ```bash
 # Edit SSL settings
 sudo nano /etc/dovecot/conf.d/10-ssl.conf
@@ -505,22 +651,23 @@ ssl_cipher_list = EECDH+AESGCM:EDH+AESGCM:AES256+EECDH:AES256+EDH
 ssl_dh_parameters_length = 2048
 ```
 
-### 7.4 Authentication Configuration
+### 8.4 Authentication Configuration
 ```bash
 # Edit authentication settings
 sudo nano /etc/dovecot/conf.d/10-auth.conf
 ```
 
-Set authentication parameters:
+Replace the configuration content with the following:
 ```plaintext
+##
+## Authentication processes
+##
+
 # Disable cleartext authentication unless using SSL/TLS
 disable_plaintext_auth = yes
 
 # Authentication mechanisms
 auth_mechanisms = plain login
-
-# Password schemes
-password_scheme = PLAIN
 
 # User database
 !include auth-system.conf.ext
@@ -533,9 +680,21 @@ service auth {
     group = postfix
   }
 }
+
+# Default password scheme - this should be in the password database section
+passdb {
+  driver = passwd-file
+  args = scheme=PLAIN username_format=%u /etc/dovecot/users
+}
+
+# User database
+userdb {
+  driver = static
+  args = uid=vmail gid=vmail home=/var/mail/vhosts/%d/%n
+}
 ```
 
-### 7.5 Mail Location Configuration
+### 8.5 Mail Location Configuration
 ```bash
 # Edit mail location settings
 sudo nano /etc/dovecot/conf.d/10-mail.conf
@@ -543,6 +702,10 @@ sudo nano /etc/dovecot/conf.d/10-mail.conf
 
 Configure mail settings:
 ```plaintext
+##
+## Mail location and mailbox settings
+##
+
 # Mail location
 mail_location = maildir:/var/mail/vhosts/%d/%n
 
@@ -550,14 +713,11 @@ mail_location = maildir:/var/mail/vhosts/%d/%n
 mail_privileged_group = mail
 mail_access_groups = mail
 
-# Index files location
-mail_index_root = /var/mail/vhosts/%d/%n/indexes
-
-# Create missing mailboxes
-mail_create_missing_dirs = yes
+# Mailbox home
+mail_home = /var/mail/vhosts/%d/%n
 ```
 
-### 7.6 Master Configuration
+### 8.6 Master Configuration
 ```bash
 # Edit master configuration
 sudo nano /etc/dovecot/conf.d/10-master.conf
@@ -586,7 +746,7 @@ service lmtp {
 }
 ```
 
-### 7.7 Create Required Directories
+### 8.7 Create Required Directories
 ```bash
 # Create index directories
 for user in admin user1 user2 user3 user4; do
@@ -600,7 +760,7 @@ sudo touch /var/log/dovecot.log /var/log/dovecot-info.log /var/log/dovecot-debug
 sudo chown vmail:vmail /var/log/dovecot*
 ```
 
-### 7.8 Test Configuration
+### 8.8 Test Configuration
 ```bash
 # Test Dovecot configuration
 sudo dovecot -n
@@ -640,489 +800,10 @@ sudo tail -f /var/log/dovecot.log
 sudo journalctl -u dovecot
 ```
 
-<a name="ssl"></a>
-## 8. SSL Certificate Setup 🔒
-
-### 8.1 Install Certbot
-```bash
-# Install Certbot and its dependencies
-sudo apt update
-sudo apt install certbot python3-certbot-nginx -y
-
-# Stop any services using port 80
-sudo systemctl stop nginx apache2 2>/dev/null
-```
-
-### 8.2 Obtain SSL Certificate
-```bash
-# Request certificate for mail domain
-sudo certbot certonly --standalone \
-    --preferred-challenges http \
-    -d mail.naphtal.tech \
-    --agree-tos \
-    --email admin@naphtal.tech \
-    --rsa-key-size 4096
-
-# Verify certificate files
-sudo ls -l /etc/letsencrypt/live/mail.naphtal.tech/
-```
-
-Expected Output:
-```plaintext
-total 4
-lrwxrwxrwx 1 root root 42 Mar 20 12:00 cert.pem -> ../../archive/mail.naphtal.tech/cert1.pem
-lrwxrwxrwx 1 root root 43 Mar 20 12:00 chain.pem -> ../../archive/mail.naphtal.tech/chain1.pem
-lrwxrwxrwx 1 root root 47 Mar 20 12:00 fullchain.pem -> ../../archive/mail.naphtal.tech/fullchain1.pem
-lrwxrwxrwx 1 root root 45 Mar 20 12:00 privkey.pem -> ../../archive/mail.naphtal.tech/privkey1.pem
-```
-
-### 8.3 Set Up Auto-Renewal
-```bash
-# Create renewal hook directory
-sudo mkdir -p /etc/letsencrypt/renewal-hooks/post
-
-# Create renewal script
-sudo nano /etc/letsencrypt/renewal-hooks/post/reload-mail-services.sh
-```
-
-Add to the script:
-```bash
-#!/bin/bash
-
-# Reload mail services after certificate renewal
-systemctl reload postfix
-systemctl reload dovecot
-
-# Log the renewal
-echo "Certificate renewed on $(date)" >> /var/log/letsencrypt-renewal.log
-```
-
-Set permissions:
-```bash
-# Make script executable
-sudo chmod +x /etc/letsencrypt/renewal-hooks/post/reload-mail-services.sh
-
-# Test auto-renewal
-sudo certbot renew --dry-run
-```
-
-### 8.4 Configure Certificate Permissions
-```bash
-# Allow mail services to read certificates
-sudo chmod -R 755 /etc/letsencrypt/live/
-sudo chmod -R 755 /etc/letsencrypt/archive/
-
-# Verify permissions
-ls -la /etc/letsencrypt/live/mail.naphtal.tech/
-```
-
-### 8.5 Update Service Configurations
-
-Update Postfix SSL settings:
-```bash
-sudo postconf -e 'smtpd_tls_cert_file=/etc/letsencrypt/live/mail.naphtal.tech/fullchain.pem'
-sudo postconf -e 'smtpd_tls_key_file=/etc/letsencrypt/live/mail.naphtal.tech/privkey.pem'
-```
-
-Update Dovecot SSL settings:
-```bash
-sudo sed -i 's|^ssl_cert.*|ssl_cert = </etc/letsencrypt/live/mail.naphtal.tech/fullchain.pem|' /etc/dovecot/conf.d/10-ssl.conf
-sudo sed -i 's|^ssl_key.*|ssl_key = </etc/letsencrypt/live/mail.naphtal.tech/privkey.pem|' /etc/dovecot/conf.d/10-ssl.conf
-```
-
-### 8.6 Verify SSL Setup
-```bash
-# Test SSL certificate
-openssl s_client -connect mail.naphtal.tech:993 -showcerts
-
-# Test SMTP over SSL
-openssl s_client -connect mail.naphtal.tech:465 -showcerts
-
-# Check certificate expiration
-echo | openssl s_client -servername mail.naphtal.tech \
-    -connect mail.naphtal.tech:993 2>/dev/null | \
-    openssl x509 -noout -dates
-```
-
-Common Issues and Solutions:
-
-1. Certificate Renewal Failures:
-```bash
-# Check renewal logs
-sudo tail -f /var/log/letsencrypt/letsencrypt.log
-
-# Force renewal test
-sudo certbot renew --force-renewal --dry-run
-```
-
-2. Permission Issues:
-```bash
-# Fix common permission problems
-sudo chmod -R 755 /etc/letsencrypt/live/
-sudo chmod -R 755 /etc/letsencrypt/archive/
-sudo chown -R root:root /etc/letsencrypt/live/
-sudo chown -R root:root /etc/letsencrypt/archive/
-```
-
-3. Service Reload Issues:
-```bash
-# Check service status after reload
-sudo systemctl status postfix
-sudo systemctl status dovecot
-
-# Check logs for errors
-sudo journalctl -u postfix --since "1 hour ago"
-sudo journalctl -u dovecot --since "1 hour ago"
-```
-
-<a name="testing"></a>
-## 9. Testing & Verification 🧪
-
-### 9.1 Service Status Verification
-```bash
-# Check all service statuses
-for service in postfix dovecot mysql; do
-    echo "=== Checking $service status ==="
-    sudo systemctl status $service | grep -E "Active:|loaded"
-    echo "----------------------------------------"
-done
-
-# Verify running processes
-sudo netstat -tlpn | grep -E ':25|:465|:587|:143|:993'
-```
-
-Expected Output:
-```plaintext
-=== Checking postfix status ===
-   Loaded: loaded (/lib/systemd/system/postfix.service; enabled; vendor preset: enabled)
-   Active: active (running) since Thu 2024-03-20 12:00:00 UTC; 1h ago
-----------------------------------------
-tcp        0      0 0.0.0.0:25            0.0.0.0:*               LISTEN      1234/master
-tcp        0      0 0.0.0.0:465           0.0.0.0:*               LISTEN      1234/master
-tcp        0      0 0.0.0.0:587           0.0.0.0:*               LISTEN      1234/master
-tcp        0      0 0.0.0.0:143           0.0.0.0:*               LISTEN      5678/dovecot
-tcp        0      0 0.0.0.0:993           0.0.0.0:*               LISTEN      5678/dovecot
-```
-
-### 9.2 Test SMTP Connection
-```bash
-# Test SMTP connection (port 25)
-nc -v mail.naphtal.tech 25
-
-# Expected interaction:
-# > EHLO mail.naphtal.tech
-# > QUIT
-```
-
-### 9.3 Test IMAP Connection
-```bash
-# Test IMAP connection (port 143)
-nc -v mail.naphtal.tech 143
-
-# Expected interaction:
-# > a LOGIN "user1@naphtal.tech" "password"
-# > a LIST "" "*"
-# > a LOGOUT
-```
-
-### 9.4 SSL Certificate Verification
-```bash
-# Test SSL on IMAPS (993)
-openssl s_client -connect mail.naphtal.tech:993 -showcerts
-
-# Test SSL on SMTPS (465)
-openssl s_client -connect mail.naphtal.tech:465 -showcerts
-
-# Verify certificate validity
-echo | openssl s_client -connect mail.naphtal.tech:993 2>/dev/null | \
-    openssl x509 -noout -text | grep "Not After"
-```
-
-### 9.5 Send Test Emails
-```bash
-# Install mail command if not present
-sudo apt install mailutils -y
-
-# Send test email internally
-echo "Test email body" | mail -s "Test Subject" user1@naphtal.tech
-
-# Check mail logs
-sudo tail -f /var/log/mail.log
-```
-
-### 9.6 Test Authentication
-```bash
-# Test SMTP Authentication
-printf "AUTH LOGIN\n$(echo -n "user1@naphtal.tech" | base64)\n$(echo -n "password" | base64)\n" | \
-openssl s_client -connect mail.naphtal.tech:587 -starttls smtp -quiet
-```
-
-### 9.7 DNS Record Verification
-```bash
-# Comprehensive DNS check script
-for record in A MX TXT SPF DMARC; do
-    echo "=== Checking $record records ==="
-    case $record in
-        "A")
-            dig +short mail.naphtal.tech A
-            ;;
-        "MX")
-            dig +short naphtal.tech MX
-            ;;
-        "TXT"|"SPF")
-            dig +short naphtal.tech TXT
-            ;;
-        "DMARC")
-            dig +short _dmarc.naphtal.tech TXT
-            ;;
-    esac
-    echo "----------------------------------------"
-done
-```
-
-### 9.8 Mail Directory Structure Check
-```bash
-# Check mail directory permissions and structure
-sudo tree -pug /var/mail/vhosts/naphtal.tech/
-
-# Verify user mailbox access
-for user in admin user1 user2 user3 user4; do
-    echo "=== Checking $user mailbox ==="
-    sudo ls -la /var/mail/vhosts/naphtal.tech/$user
-    echo "----------------------------------------"
-done
-```
-
-### 9.9 Log Analysis
-```bash
-# Create log analysis script
-cat << 'EOF' > check_mail_logs.sh
-#!/bin/bash
-
-echo "=== Last 10 Authentication Attempts ==="
-grep "auth" /var/log/mail.log | tail -n 10
-
-echo -e "\n=== Recent Connection Attempts ==="
-grep "connect from" /var/log/mail.log | tail -n 5
-
-echo -e "\n=== Recent Email Deliveries ==="
-grep "status=sent" /var/log/mail.log | tail -n 5
-
-echo -e "\n=== Recent Errors ==="
-grep "error" /var/log/mail.log | tail -n 5
-EOF
-
-chmod +x check_mail_logs.sh
-sudo ./check_mail_logs.sh
-```
-
-Common Issues and Solutions:
-
-1. Connection Refused:
-```bash
-# Check if services are running
-sudo systemctl restart postfix dovecot
-
-# Verify firewall settings
-sudo ufw status
-```
-
-2. Authentication Failures:
-```bash
-# Check password file permissions
-sudo ls -l /etc/dovecot/users
-sudo chown vmail:dovecot /etc/dovecot/users
-sudo chmod 640 /etc/dovecot/users
-```
-
-3. Mail Delivery Issues:
-```bash
-# Check mail queue
-sudo postqueue -p
-
-# Attempt to flush queue
-sudo postqueue -f
-
-# Check for blocked ports
-sudo iptables -L
-```
-
-<a name="client-setup"></a>
-## 10. Email Client Setup 📱
-
-### 10.1 General Settings for All Clients
-
-#### Incoming Mail (IMAP) Settings:
-```plaintext
-Server: mail.naphtal.tech
-Port: 993 (SSL/TLS) or 143 (STARTTLS)
-Username: full email (e.g., user1@naphtal.tech)
-Password: [your password]
-Security: SSL/TLS or STARTTLS
-Authentication: Normal Password
-```
-
-#### Outgoing Mail (SMTP) Settings:
-```plaintext
-Server: mail.naphtal.tech
-Port: 587 (STARTTLS) or 465 (SSL/TLS)
-Username: full email (same as incoming)
-Password: [your password]
-Security: STARTTLS or SSL/TLS
-Authentication: Normal Password
-```
-
-### 10.2 Thunderbird Setup
-
-1. Account Creation:
-```plaintext
-1. Click Menu ≡ → New → Email Account
-2. Enter:
-   - Your name: [User's Name]
-   - Email address: user1@naphtal.tech
-   - Password: [your password]
-3. Click 'Configure manually'
-4. Enter server settings as above
-```
-
-2. Advanced Settings:
-```plaintext
-1. Server Settings → Server Settings:
-   - Connection security: SSL/TLS
-   - Authentication method: Normal password
-   
-2. Outgoing Server (SMTP):
-   - Connection security: STARTTLS
-   - Authentication method: Normal password
-   - Server name: mail.naphtal.tech
-```
-
-### 10.3 Outlook Setup
-
-1. Account Addition:
-```plaintext
-1. File → Add Account
-2. Choose 'Manual setup or additional server types'
-3. Choose 'POP or IMAP'
-4. Enter:
-   - Your Name: [User's Name]
-   - Email Address: user1@naphtal.tech
-   - Account Type: IMAP
-   - Incoming mail server: mail.naphtal.tech
-   - Outgoing mail server: mail.naphtal.tech
-```
-
-2. Advanced Settings:
-```plaintext
-1. More Settings → Advanced:
-   Incoming Server (IMAP):
-   - Port: 993
-   - Encryption: SSL/TLS
-
-   Outgoing Server (SMTP):
-   - Port: 587
-   - Encryption: STARTTLS
-```
-
-### 10.4 iPhone/iPad Setup
-
-1. iOS Mail App:
-```plaintext
-1. Settings → Mail → Accounts → Add Account
-2. Choose 'Other' → Add Mail Account
-3. Enter:
-   - Name: [User's Name]
-   - Email: user1@naphtal.tech
-   - Password: [your password]
-   - Description: Naphtal Tech Mail
-
-4. Choose 'IMAP' and enter server information:
-   Incoming Mail Server:
-   - Host Name: mail.naphtal.tech
-   - Username: user1@naphtal.tech
-   - Password: [your password]
-
-   Outgoing Mail Server:
-   - Host Name: mail.naphtal.tech
-   - Username: user1@naphtal.tech
-   - Password: [your password]
-```
-
-### 10.5 Android Setup
-
-1. Gmail App:
-```plaintext
-1. Open Gmail → Menu → Settings → Add account
-2. Choose 'Other'
-3. Enter email address: user1@naphtal.tech
-4. Choose 'Personal (IMAP)'
-5. Enter password
-6. Enter server settings:
-   
-   Incoming Server:
-   - Server: mail.naphtal.tech
-   - Port: 993
-   - Security type: SSL/TLS
-   
-   Outgoing Server:
-   - Server: mail.naphtal.tech
-   - Port: 587
-   - Security type: STARTTLS
-```
-
-### 10.6 Testing Email Client Setup
-
-1. Send Test Email:
-```plaintext
-1. Compose new email
-2. To: admin@naphtal.tech
-3. Subject: Test Email from [Client Name]
-4. Body: This is a test email from [Client Name]
-5. Send and verify delivery
-```
-
-2. Verify Settings:
-```plaintext
-1. Check Sent folder
-2. Check server logs:
-   sudo tail -f /var/log/mail.log
-3. Verify received email
-4. Test reply functionality
-```
-
-Common Issues and Solutions:
-
-1. Connection Errors:
-```plaintext
-Problem: "Unable to connect to server"
-Solution: 
-- Verify server address is correct
-- Check ports are not blocked
-- Ensure SSL/TLS settings match
-```
-
-2. Authentication Failures:
-```plaintext
-Problem: "Invalid username or password"
-Solution:
-- Verify full email address is used as username
-- Check password is correct
-- Ensure authentication method matches server
-```
-
-3. SSL Certificate Warnings:
-```plaintext
-Problem: "Certificate not trusted"
-Solution:
-- Verify certificate is valid
-- Check certificate is properly installed
-- Update client's trusted certificates
-```
-
 <a name="security-hardening"></a>
-## 11. Security Hardening 🛡️
+## 9. Security Hardening 🛡️
 
-### 11.1 Fail2ban Configuration
+### 9.1 Fail2ban Configuration
 
 1. Install and Configure Fail2ban:
 ```bash
@@ -1177,7 +858,7 @@ failregex = ^%(__prefix_line)swarning: .*\[<HOST>\]: SASL (LOGIN|PLAIN) authenti
 ignoreregex =
 ```
 
-### 11.2 Firewall Configuration (UFW)
+### 9.2 Firewall Configuration (UFW)
 
 ```bash
 # Install UFW if not present
@@ -1208,7 +889,7 @@ sudo ufw enable
 sudo ufw status verbose
 ```
 
-### 11.3 SSL/TLS Hardening
+### 9.3 SSL/TLS Hardening
 
 1. Update Postfix SSL Configuration:
 ```bash
@@ -1238,7 +919,7 @@ ssl_cipher_list = ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDH
 ssl_prefer_server_ciphers = yes
 ```
 
-### 11.4 System Hardening
+### 9.4 System Hardening
 
 1. Secure Shared Memory:
 ```bash
@@ -1275,7 +956,7 @@ kernel.randomize_va_space=2
 sudo sysctl -p
 ```
 
-### 11.5 Regular Security Maintenance
+### 9.5 Regular Security Maintenance
 
 1. Create Security Maintenance Script:
 ```bash
@@ -1325,6 +1006,350 @@ sudo apt install unattended-upgrades -y
 sudo dpkg-reconfigure -plow unattended-upgrades
 ```
 
+## 10. Testing & Verification 🧪
+
+### 10.1 Service Status Verification
+```bash
+# Check all service statuses
+for service in postfix dovecot mysql; do
+    echo "=== Checking $service status ==="
+    sudo systemctl status $service | grep -E "Active:|loaded"
+    echo "----------------------------------------"
+done
+
+# Verify running processes
+sudo netstat -tlpn | grep -E ':25|:465|:587|:143|:993'
+```
+
+Expected Output:
+```plaintext
+=== Checking postfix status ===
+   Loaded: loaded (/lib/systemd/system/postfix.service; enabled; vendor preset: enabled)
+   Active: active (running) since Thu 2024-03-20 12:00:00 UTC; 1h ago
+----------------------------------------
+tcp        0      0 0.0.0.0:25            0.0.0.0:*               LISTEN      1234/master
+tcp        0      0 0.0.0.0:465           0.0.0.0:*               LISTEN      1234/master
+tcp        0      0 0.0.0.0:587           0.0.0.0:*               LISTEN      1234/master
+tcp        0      0 0.0.0.0:143           0.0.0.0:*               LISTEN      5678/dovecot
+tcp        0      0 0.0.0.0:993           0.0.0.0:*               LISTEN      5678/dovecot
+```
+
+### 10.2 Test SMTP Connection
+```bash
+# Test SMTP connection (port 25)
+nc -v mail.naphtal.tech 25
+
+# Expected interaction:
+# > EHLO mail.naphtal.tech
+# > QUIT
+```
+
+### 10.3 Test IMAP Connection
+```bash
+# Test IMAP connection (port 143)
+nc -v mail.naphtal.tech 143
+
+# Expected interaction:
+# > a LOGIN "user1@naphtal.tech" "password"
+# > a LIST "" "*"
+# > a LOGOUT
+```
+
+### 10.4 SSL Certificate Verification
+```bash
+# Test SSL on IMAPS (993)
+openssl s_client -connect mail.naphtal.tech:993 -showcerts
+
+# Test SSL on SMTPS (465)
+openssl s_client -connect mail.naphtal.tech:465 -showcerts
+
+# Verify certificate validity
+echo | openssl s_client -connect mail.naphtal.tech:993 2>/dev/null | \
+    openssl x509 -noout -text | grep "Not After"
+```
+
+### 10.5 Send Test Emails
+```bash
+# Install mail command if not present
+sudo apt install mailutils -y
+
+# Send test email internally
+echo "Test email body" | mail -s "Test Subject" user1@naphtal.tech
+
+# Check mail logs
+sudo tail -f /var/log/mail.log
+```
+
+### 10.6 Test Authentication
+```bash
+# Test SMTP Authentication
+printf "AUTH LOGIN\n$(echo -n "user1@naphtal.tech" | base64)\n$(echo -n "password" | base64)\n" | \
+openssl s_client -connect mail.naphtal.tech:587 -starttls smtp -quiet
+```
+
+### 10.7 DNS Record Verification
+```bash
+# Comprehensive DNS check script
+for record in A MX TXT SPF DMARC; do
+    echo "=== Checking $record records ==="
+    case $record in
+        "A")
+            dig +short mail.naphtal.tech A
+            ;;
+        "MX")
+            dig +short naphtal.tech MX
+            ;;
+        "TXT"|"SPF")
+            dig +short naphtal.tech TXT
+            ;;
+        "DMARC")
+            dig +short _dmarc.naphtal.tech TXT
+            ;;
+    esac
+    echo "----------------------------------------"
+done
+```
+
+### 10.8 Mail Directory Structure Check
+```bash
+# Check mail directory permissions and structure
+sudo tree -pug /var/mail/vhosts/naphtal.tech/
+
+# Verify user mailbox access
+for user in admin user1 user2 user3 user4; do
+    echo "=== Checking $user mailbox ==="
+    sudo ls -la /var/mail/vhosts/naphtal.tech/$user
+    echo "----------------------------------------"
+done
+```
+
+### 10.9 Log Analysis
+```bash
+# Create log analysis script
+cat << 'EOF' > check_mail_logs.sh
+#!/bin/bash
+
+echo "=== Last 10 Authentication Attempts ==="
+grep "auth" /var/log/mail.log | tail -n 10
+
+echo -e "\n=== Recent Connection Attempts ==="
+grep "connect from" /var/log/mail.log | tail -n 5
+
+echo -e "\n=== Recent Email Deliveries ==="
+grep "status=sent" /var/log/mail.log | tail -n 5
+
+echo -e "\n=== Recent Errors ==="
+grep "error" /var/log/mail.log | tail -n 5
+EOF
+
+chmod +x check_mail_logs.sh
+sudo ./check_mail_logs.sh
+```
+
+Common Issues and Solutions:
+
+1. Connection Refused:
+```bash
+# Check if services are running
+sudo systemctl restart postfix dovecot
+
+# Verify firewall settings
+sudo ufw status
+```
+
+2. Authentication Failures:
+```bash
+# Check password file permissions
+sudo ls -l /etc/dovecot/users
+sudo chown vmail:dovecot /etc/dovecot/users
+sudo chmod 640 /etc/dovecot/users
+```
+
+3. Mail Delivery Issues:
+```bash
+# Check mail queue
+sudo postqueue -p
+
+# Attempt to flush queue
+sudo postqueue -f
+
+# Check for blocked ports
+sudo iptables -L
+```
+
+<a name="client-setup"></a>
+## 11. Email Client Setup 📱
+
+### 11.1 General Settings for All Clients
+
+#### Incoming Mail (IMAP) Settings:
+```plaintext
+Server: mail.naphtal.tech
+Port: 993 (SSL/TLS) or 143 (STARTTLS)
+Username: full email (e.g., user1@naphtal.tech)
+Password: [your password]
+Security: SSL/TLS or STARTTLS
+Authentication: Normal Password
+```
+
+#### Outgoing Mail (SMTP) Settings:
+```plaintext
+Server: mail.naphtal.tech
+Port: 587 (STARTTLS) or 465 (SSL/TLS)
+Username: full email (same as incoming)
+Password: [your password]
+Security: STARTTLS or SSL/TLS
+Authentication: Normal Password
+```
+
+### 11.2 Thunderbird Setup
+
+1. Account Creation:
+```plaintext
+1. Click Menu ≡ → New → Email Account
+2. Enter:
+   - Your name: [User's Name]
+   - Email address: user1@naphtal.tech
+   - Password: [your password]
+3. Click 'Configure manually'
+4. Enter server settings as above
+```
+
+2. Advanced Settings:
+```plaintext
+1. Server Settings → Server Settings:
+   - Connection security: SSL/TLS
+   - Authentication method: Normal password
+   
+2. Outgoing Server (SMTP):
+   - Connection security: STARTTLS
+   - Authentication method: Normal password
+   - Server name: mail.naphtal.tech
+```
+
+### 11.3 Outlook Setup
+
+1. Account Addition:
+```plaintext
+1. File → Add Account
+2. Choose 'Manual setup or additional server types'
+3. Choose 'POP or IMAP'
+4. Enter:
+   - Your Name: [User's Name]
+   - Email Address: user1@naphtal.tech
+   - Account Type: IMAP
+   - Incoming mail server: mail.naphtal.tech
+   - Outgoing mail server: mail.naphtal.tech
+```
+
+2. Advanced Settings:
+```plaintext
+1. More Settings → Advanced:
+   Incoming Server (IMAP):
+   - Port: 993
+   - Encryption: SSL/TLS
+
+   Outgoing Server (SMTP):
+   - Port: 587
+   - Encryption: STARTTLS
+```
+
+### 11.4 iPhone/iPad Setup
+
+1. iOS Mail App:
+```plaintext
+1. Settings → Mail → Accounts → Add Account
+2. Choose 'Other' → Add Mail Account
+3. Enter:
+   - Name: [User's Name]
+   - Email: user1@naphtal.tech
+   - Password: [your password]
+   - Description: Naphtal Tech Mail
+
+4. Choose 'IMAP' and enter server information:
+   Incoming Mail Server:
+   - Host Name: mail.naphtal.tech
+   - Username: user1@naphtal.tech
+   - Password: [your password]
+
+   Outgoing Mail Server:
+   - Host Name: mail.naphtal.tech
+   - Username: user1@naphtal.tech
+   - Password: [your password]
+```
+
+### 11.5 Android Setup
+
+1. Gmail App:
+```plaintext
+1. Open Gmail → Menu → Settings → Add account
+2. Choose 'Other'
+3. Enter email address: user1@naphtal.tech
+4. Choose 'Personal (IMAP)'
+5. Enter password
+6. Enter server settings:
+   
+   Incoming Server:
+   - Server: mail.naphtal.tech
+   - Port: 993
+   - Security type: SSL/TLS
+   
+   Outgoing Server:
+   - Server: mail.naphtal.tech
+   - Port: 587
+   - Security type: STARTTLS
+```
+
+### 11.6 Testing Email Client Setup
+
+1. Send Test Email:
+```plaintext
+1. Compose new email
+2. To: admin@naphtal.tech
+3. Subject: Test Email from [Client Name]
+4. Body: This is a test email from [Client Name]
+5. Send and verify delivery
+```
+
+2. Verify Settings:
+```plaintext
+1. Check Sent folder
+2. Check server logs:
+   sudo tail -f /var/log/mail.log
+3. Verify received email
+4. Test reply functionality
+```
+
+Common Issues and Solutions:
+
+1. Connection Errors:
+```plaintext
+Problem: "Unable to connect to server"
+Solution: 
+- Verify server address is correct
+- Check ports are not blocked
+- Ensure SSL/TLS settings match
+```
+
+2. Authentication Failures:
+```plaintext
+Problem: "Invalid username or password"
+Solution:
+- Verify full email address is used as username
+- Check password is correct
+- Ensure authentication method matches server
+```
+
+3. SSL Certificate Warnings:
+```plaintext
+Problem: "Certificate not trusted"
+Solution:
+- Verify certificate is valid
+- Check certificate is properly installed
+- Update client's trusted certificates
+```
+
+<a name="monitoring"></a>
 ## 12. Monitoring & Maintenance 📊
 
 ### 12.1 Setup Monitoring Tools
@@ -1390,134 +1415,7 @@ Add these lines:
 0 2 * * * /usr/sbin/logrotate /etc/logrotate.d/mail
 ```
 
-
-
-
-## Testing Email Sending
-
-### 1. Using Command Line
-```bash
-# Simple mail command
-echo "This is a test email body" | mail -s "Test Subject" usanaphtal112@gmail.com
-
-# Detailed mail command with from address
-echo "This is a test email body" | mail -s "Test Subject" -r admin@naphtal.tech usanaphtal112@gmail.com
-
-# Using swaks (Swiss Army Knife for SMTP) for detailed testing
-sudo apt install swaks -y
-
-# Test with STARTTLS (port 587)
-swaks --to usanaphtal112@gmail.com \
-      --from admin@naphtal.tech \
-      --server mail.naphtal.tech \
-      --port 587 \
-      --auth-user admin@naphtal.tech \
-      --auth-password "your-password" \
-      --tls \
-      --header "Subject: Test Email" \
-      --body "This is a test email from my mail server"
-
-# Test with SSL (port 465)
-swaks --to usanaphtal112@gmail.com \
-      --from admin@naphtal.tech \
-      --server mail.naphtal.tech \
-      --port 465 \
-      --auth-user admin@naphtal.tech \
-      --auth-password "your-password" \
-      --tls-on-connect \
-      --header "Subject: Test Email" \
-      --body "This is a test email from my mail server"
-```
-
-### 2. Using Python Script
-```python
-#!/usr/bin/python3
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-
-# Email configuration
-smtp_server = "mail.naphtal.tech"
-smtp_port = 587  # or 465 for SSL
-sender_email = "admin@naphtal.tech"
-sender_password = "your-password"
-recipient_email = "usanaphtal112@gmail.com"
-
-# Create message
-msg = MIMEMultipart()
-msg['From'] = sender_email
-msg['To'] = recipient_email
-msg['Subject'] = "Test Email from Python"
-
-body = "This is a test email sent from my mail server using Python."
-msg.attach(MIMEText(body, 'plain'))
-
-try:
-    # Create server connection
-    server = smtplib.SMTP(smtp_server, smtp_port)
-    server.starttls()  # Enable TLS
-    
-    # Login and send email
-    server.login(sender_email, sender_password)
-    text = msg.as_string()
-    server.sendmail(sender_email, recipient_email, text)
-    print("Email sent successfully!")
-    
-except Exception as e:
-    print(f"Error sending email: {e}")
-    
-finally:
-    server.quit()
-```
-
-### 3. Verify Email Delivery
-```bash
-# Check mail logs for delivery status
-sudo tail -f /var/log/mail.log
-
-# Check mail queue
-sudo postqueue -p
-
-# Check for any errors
-sudo grep "error" /var/log/mail.log | tail -n 20
-```
-
-### Common Issues and Solutions:
-
-1. If emails are not being delivered:
-```bash
-# Check if your IP is blacklisted
-dig +short zen.spamhaus.org
-
-# Verify reverse DNS
-dig -x 34.203.228.116
-
-# Check SPF record
-dig TXT naphtal.tech
-```
-
-2. If authentication fails:
-```bash
-# Verify user permissions
-sudo postconf -e 'smtpd_sasl_auth_enable = yes'
-sudo postconf -e 'broken_sasl_auth_clients = yes'
-
-# Restart services
-sudo systemctl restart postfix
-sudo systemctl restart dovecot
-```
-
-3. If TLS/SSL fails:
-```bash
-# Verify certificate permissions
-sudo ls -l /etc/letsencrypt/live/mail.naphtal.tech/
-sudo chmod -R 755 /etc/letsencrypt/live/
-sudo chmod -R 755 /etc/letsencrypt/archive/
-```
-
-
-
-
+<a name="django-flask"></a>
 ## 13. Django/Flask Email Integration 🐍
 
 ### 13.1 Django Email Configuration
@@ -1667,4 +1565,81 @@ def send_email_with_logging(subject, message, recipient_list):
         logging.error(f"Failed to send email: {str(e)}")
         raise
 ```
+
+<a name="troubleshooting"></a>
+## 14. Troubleshooting Guide 🔧
+
+### 14.1 Common Issues and Solutions
+
+1. Connection Refused:
+```bash
+# Check if services are running
+sudo systemctl restart postfix dovecot
+
+# Verify firewall settings
+sudo ufw status
+```
+
+2. Authentication Failures:
+```bash
+# Verify user permissions
+sudo postconf -e 'smtpd_sasl_auth_enable = yes'
+sudo postconf -e 'broken_sasl_auth_clients = yes'
+
+# Restart services
+sudo systemctl restart postfix
+sudo systemctl restart dovecot
+```
+
+3. SSL Certificate Warnings:
+```bash
+# Verify certificate permissions
+sudo ls -l /etc/letsencrypt/live/mail.naphtal.tech/
+sudo chmod -R 755 /etc/letsencrypt/live/
+sudo chmod -R 755 /etc/letsencrypt/archive/
+```
+
+4. Mail Delivery Issues:
+```bash
+# Check mail queue
+sudo postqueue -p
+
+# Attempt to flush queue
+sudo postqueue -f
+
+# Check for blocked ports
+sudo iptables -L
+```
+
+### 14.2 Additional Resources
+
+1. Postfix Documentation:
+   - [Postfix Documentation](https://www.postfix.org/documentation.html)
+
+2. Dovecot Documentation:
+   - [Dovecot Documentation](https://www.dovecot.org/documentation.html)
+
+3. Certbot Documentation:
+   - [Certbot Documentation](https://certbot.eff.org/docs/)
+
+4. Fail2ban Documentation:
+   - [Fail2ban Documentation](https://www.fail2ban.org/wiki/index.php/Main_Page)
+
+5. UFW Documentation:
+   - [UFW Documentation](https://wiki.ubuntu.com/UncomplicatedFirewall)
+
+6. System Security Documentation:
+   - [System Security Documentation](https://www.debian.org/doc/manuals/securing-debian-howto/)
+
+7. Monitoring Documentation:
+   - [Monitoring Documentation](https://www.monitoring-plugins.org/doc/)
+
+8. Django Email Integration Documentation:
+   - [Django Email Integration Documentation](https://docs.djangoproject.com/en/stable/topics/email/)
+
+9. Flask Email Integration Documentation:
+   - [Flask Email Integration Documentation](https://flask-mail.readthedocs.io/)
+
+10. Security Hardening Documentation:
+    - [Security Hardening Documentation](https://www.debian.org/doc/manuals/securing-debian-howto/)
 
